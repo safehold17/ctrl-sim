@@ -1,4 +1,4 @@
-name: ctrl_sim
+name: test-ctrlsim
 channels:
   - defaults
   - pyg

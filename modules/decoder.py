@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from utils.train_utils import weight_init, get_causal_mask
-from utils.layers import MLPLayer
+from utils.layers import MLPLayer, ResidualMLP
 import torch.nn.functional as F 
 
 class Decoder(nn.Module):
@@ -12,19 +12,27 @@ class Decoder(nn.Module):
         self.cfg = cfg
         self.cfg_model = self.cfg.model
         self.cfg_rl_waymo = self.cfg.dataset.waymo
-        self.action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.use_k_actions = getattr(self.cfg_rl_waymo, 'action_space', 'grid') == 'k_action'
+        self.use_residual_mlp = getattr(self.cfg_model, 'use_residual_mlp', False)
+        self.residual_layers = getattr(self.cfg_model, 'residual_mlp_layers', 2)
+        self.grid_action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.k_action_dim = getattr(self.cfg_rl_waymo, 'k_action_vocab_size', None)
+        if self.use_k_actions and self.k_action_dim is None:
+            raise ValueError("cfg.dataset.waymo.k_action_vocab_size must be set when action_space is k_action.")
+        self.action_dim = self.k_action_dim if self.use_k_actions else self.grid_action_dim
         self.transformer_decoder = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=self.cfg_model.hidden_dim, 
                                                                                     dim_feedforward=self.cfg_model.dim_feedforward,
                                                                                     nhead=self.cfg_model.num_heads,
                                                                                     batch_first=True), 
                                                                                     num_layers=self.cfg_model.num_decoder_layers)
-        self.predict_action = MLPLayer(self.cfg_model.hidden_dim, self.cfg_model.hidden_dim, self.action_dim)
+        self.predict_grid_action = self._build_mlp(self.cfg_model.hidden_dim, self.grid_action_dim)
+        self.predict_k_action = self._build_mlp(self.cfg_model.hidden_dim, self.k_action_dim) if self.k_action_dim is not None else None
 
         if self.cfg_model.predict_rtg:
-            self.predict_rtg = MLPLayer(self.cfg_model.hidden_dim, self.cfg_model.hidden_dim, self.cfg_rl_waymo.rtg_discretization * self.cfg_model.num_reward_components)
+            self.predict_rtg = self._build_mlp(self.cfg_model.hidden_dim, self.cfg_rl_waymo.rtg_discretization * self.cfg_model.num_reward_components)
 
         if self.cfg_model.predict_future_states:
-            self.predict_future_states = MLPLayer(self.cfg_model.hidden_dim, self.cfg_model.hidden_dim, self.cfg_rl_waymo.train_context_length * 2)
+            self.predict_future_states = self._build_mlp(self.cfg_model.hidden_dim, self.cfg_rl_waymo.train_context_length * 2, hidden_dim=self.cfg_model.hidden_dim)
 
         if not (self.cfg_model.trajeglish or self.cfg_model.il):
             num_types = 3
@@ -34,6 +42,22 @@ class Decoder(nn.Module):
             num_types = 2
         self.causal_mask = get_causal_mask(self.cfg, self.cfg_rl_waymo.train_context_length, num_types)
         self.apply(weight_init)
+
+
+    def _build_mlp(self, input_dim, output_dim, hidden_dim=None):
+        hidden_dim = hidden_dim or self.cfg_model.hidden_dim
+        if self.use_residual_mlp:
+            return ResidualMLP(input_dim=input_dim,
+                               hidden_dim=hidden_dim,
+                               n_hidden=self.residual_layers,
+                               output_dim=output_dim)
+        return MLPLayer(input_dim, hidden_dim, output_dim)
+
+
+    def _reshape_actions(self, logits, batch_size, seq_len, action_dim):
+        if logits is None:
+            return None
+        return logits.reshape(batch_size, seq_len, self.cfg_rl_waymo.max_num_agents, action_dim).permute(0, 2, 1, 3)
 
 
     def forward(self, data, scene_enc, eval=False):
@@ -55,16 +79,30 @@ class Decoder(nn.Module):
         if not (self.cfg_model.trajeglish or self.cfg_model.il):
             # [batch_size, 3, num_timesteps * num_agents, hidden_dim]
             output = output.reshape(batch_size, seq_len*self.cfg_rl_waymo.max_num_agents, 3, self.cfg_model.hidden_dim).permute(0, 2, 1, 3)
-            action_preds = self.predict_action(output[:, 1])
+            action_token = output[:, 1]
         elif self.cfg_model.trajeglish:
             output = output.reshape(batch_size, seq_len*self.cfg_rl_waymo.max_num_agents, 1, self.cfg_model.hidden_dim).permute(0, 2, 1, 3)
-            action_preds = self.predict_action(output[:, 0])
+            action_token = output[:, 0]
         else:
             output = output.reshape(batch_size, seq_len*self.cfg_rl_waymo.max_num_agents, 2, self.cfg_model.hidden_dim).permute(0, 2, 1, 3)
-            action_preds = self.predict_action(output[:, 0])
-        # [batch_size, num_agents, num_timesteps, action_dim]
-        action_preds = action_preds.reshape(batch_size, seq_len, self.cfg_rl_waymo.max_num_agents, self.action_dim).permute(0, 2, 1, 3)
-        preds['action_preds'] = action_preds
+            action_token = output[:, 0]
+
+        grid_action_logits = self.predict_grid_action(action_token) if self.predict_grid_action is not None else None
+        k_action_logits = self.predict_k_action(action_token) if self.predict_k_action is not None else None
+        grid_action_preds = self._reshape_actions(grid_action_logits, batch_size, seq_len, self.grid_action_dim)
+        k_action_preds = self._reshape_actions(k_action_logits, batch_size, seq_len, self.k_action_dim) if self.predict_k_action is not None else None
+
+        if grid_action_preds is not None:
+            preds['grid_action_preds'] = grid_action_preds
+        if k_action_preds is not None:
+            preds['k_action_preds'] = k_action_preds
+
+        if self.use_k_actions:
+            if k_action_preds is None:
+                raise ValueError("k_action head is not initialized but action_space is k_action.")
+            preds['action_preds'] = k_action_preds
+        else:
+            preds['action_preds'] = grid_action_preds
 
         if self.cfg_model.predict_future_states:
             state_preds = self.predict_future_states(output[:, 2])

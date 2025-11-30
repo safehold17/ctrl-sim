@@ -27,6 +27,32 @@ class RLWaymoDatasetCtRLSim(RLWaymoDataset):
         super(RLWaymoDatasetCtRLSim, self).__init__(cfg, split_name, mode)
 
     
+    def _get_raw_file_name(self, idx):
+        return os.path.splitext(os.path.basename(self.files[idx]))[0]
+
+
+    def _extract_k_actions(self, agents_data):
+        k_actions = []
+        for agent in agents_data:
+            if 'k_action' not in agent:
+                return None
+            k_actions.append(agent['k_action'])
+        if len(k_actions) == 0:
+            return None
+        return np.array(k_actions, dtype=int)
+
+
+    def _load_k_actions_from_raw(self, raw_file_name):
+        raw_json_path = os.path.join(self.cfg_dataset.dataset_path, f"{self.split_name}", f"{raw_file_name}.json")
+        if not os.path.exists(raw_json_path):
+            return None
+        with open(raw_json_path, 'r') as f:
+            raw_data = json.load(f)
+        if 'objects' not in raw_data:
+            return None
+        return self._extract_k_actions(raw_data['objects'])
+
+
     def select_random_origin_agent(self, agent_states, moving_mask):
         # search for moving agent that exists at first timestep
         valid_idxs = np.where((agent_states[:, 0, -1] == 1) * moving_mask)[0]
@@ -37,12 +63,14 @@ class RLWaymoDatasetCtRLSim(RLWaymoDataset):
     
     def get_data(self, data, idx):
         if self.preprocess:
+            raw_file_name = self._get_raw_file_name(idx)
             idx = data['idx']
             num_agents = data['num_agents']
             road_points = data['road_points']
             road_types = data['road_types']
             ag_data = data['ag_data']
             ag_actions = data['ag_actions']
+            ag_k_actions = data.get('ag_k_actions', None)
             ag_types = data['ag_types']
             last_exist_timesteps = data['last_exist_timesteps']
             ag_rewards = data['ag_rewards']
@@ -50,6 +78,10 @@ class RLWaymoDatasetCtRLSim(RLWaymoDataset):
             veh_veh_dist_rewards = data['veh_veh_dist_rewards']
             filtered_ag_ids = data['filtered_ag_ids']
             ag_goals = data['ag_goals']
+            if ag_k_actions is None:
+                ag_k_actions = self._load_k_actions_from_raw(raw_file_name)
+            if ag_k_actions is not None:
+                ag_k_actions = np.array(ag_k_actions, dtype=int)
             
         else:
             agent_data = data['objects']
@@ -57,6 +89,7 @@ class RLWaymoDatasetCtRLSim(RLWaymoDataset):
 
             road_points, road_types, road_edge_polylines = self.get_roads(data)
             ag_data, ag_actions, ag_rewards, ag_types, ag_goals, parked_ids, incomplete_ids, last_exist_timesteps = self.extract_rawdata(agent_data)
+            ag_k_actions = self._extract_k_actions(agent_data)
             # zero out reward when timestep does not exist
             veh_edge_dist_rewards = self.compute_dist_to_nearest_road_edge_rewards(ag_data.copy(), road_edge_polylines) * ag_data[:, :, -1]
             veh_veh_dist_rewards = self.compute_dist_to_nearest_vehicle_rewards(ag_data.copy()) * ag_data[:, :, -1]
@@ -66,7 +99,7 @@ class RLWaymoDatasetCtRLSim(RLWaymoDataset):
             filtered_ag_ids = list(filter(lambda x: x not in incomplete_ids, raw_ag_ids))
             assert len(filtered_ag_ids) > 0
             
-            raw_file_name = os.path.splitext(os.path.basename(self.files[idx]))[0]
+            raw_file_name = self._get_raw_file_name(idx)
             to_pickle = dict()
             to_pickle['idx'] = idx
             to_pickle['num_agents'] = num_agents 
@@ -74,6 +107,8 @@ class RLWaymoDatasetCtRLSim(RLWaymoDataset):
             to_pickle['road_types'] = road_types
             to_pickle['ag_data'] = ag_data 
             to_pickle['ag_actions'] = ag_actions 
+            if ag_k_actions is not None:
+                to_pickle['ag_k_actions'] = ag_k_actions
             to_pickle['ag_types'] = ag_types 
             to_pickle['last_exist_timesteps'] = last_exist_timesteps 
             to_pickle['veh_edge_dist_rewards'] = veh_edge_dist_rewards
@@ -120,15 +155,26 @@ class RLWaymoDatasetCtRLSim(RLWaymoDataset):
         agent_states = ag_data[filtered_ag_ids, origin_t:origin_t+self.cfg_dataset.train_context_length]
         agent_types = ag_types[filtered_ag_ids]
         actions = ag_actions[filtered_ag_ids, origin_t:origin_t+self.cfg_dataset.train_context_length]
+        k_actions = None
+        if ag_k_actions is not None:
+            k_actions = np.array(ag_k_actions)[filtered_ag_ids, origin_t:origin_t+self.cfg_dataset.train_context_length]
         rtgs = rtgs[filtered_ag_ids, origin_t:origin_t+self.cfg_dataset.train_context_length]
+        if getattr(self.cfg_dataset, 'action_space', 'grid') == 'k_action' and k_actions is None:
+            raise ValueError(f"k_action tokens not found for sample {raw_file_name} while action_space is k_action.")
 
         # filter for agents that move at least 0.05 metres
         moving_agent_mask = np.isin(filtered_ag_ids, moving_ids)
         # randomly choose moving agent to be at origin
         origin_agent_idx = self.select_random_origin_agent(agent_states, moving_agent_mask)
 
-        agent_states, agent_types, actions, rtgs, goals, moving_agent_mask, new_origin_agent_idx = self.select_relevant_agents(agent_states, agent_types, actions, rtgs, goals, origin_agent_idx, 0, moving_agent_mask)
+        if k_actions is not None:
+            (agent_states, agent_types, actions, rtgs, goals, moving_agent_mask,
+             k_actions, new_origin_agent_idx) = self.select_relevant_agents(agent_states, agent_types, actions, rtgs, goals, origin_agent_idx, 0, moving_agent_mask, k_actions=k_actions)
+        else:
+            agent_states, agent_types, actions, rtgs, goals, moving_agent_mask, new_origin_agent_idx = self.select_relevant_agents(agent_states, agent_types, actions, rtgs, goals, origin_agent_idx, 0, moving_agent_mask)
         actions = self.discretize_actions(actions)
+        if k_actions is not None:
+            k_actions = k_actions.astype(int)
         if not self.cfg_model.decision_transformer:
             rtgs = self.discretize_rtgs(rtgs)
         
@@ -141,7 +187,7 @@ class RLWaymoDatasetCtRLSim(RLWaymoDataset):
             d = dict()
             d['idx'] = idx
             # need to add batch dim as pytorch_geometric batches along first dimension of torch Tensors
-            d['agent'] = from_numpy({
+            agent_dict = {
                 'agent_states': add_batch_dim(agent_states),
                 'agent_types': add_batch_dim(agent_types), 
                 'goals': add_batch_dim(goals),
@@ -149,7 +195,10 @@ class RLWaymoDatasetCtRLSim(RLWaymoDataset):
                 'rtgs': add_batch_dim(rtgs),
                 'timesteps': add_batch_dim(timesteps),
                 'moving_agent_mask': add_batch_dim(moving_agent_mask)
-            })
+            }
+            if k_actions is not None:
+                agent_dict['k_actions'] = add_batch_dim(k_actions)
+            d['agent'] = from_numpy(agent_dict)
             d['map'] = from_numpy({
                 'road_points': add_batch_dim(road_points),
                 'road_types': add_batch_dim(road_types)

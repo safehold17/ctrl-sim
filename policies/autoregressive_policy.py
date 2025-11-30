@@ -46,6 +46,9 @@ class AutoregressivePolicy(Policy):
             self.goal_tilt = tilt_dict['goal_tilt']
             self.veh_veh_tilt = tilt_dict['veh_veh_tilt']
             self.veh_edge_tilt = tilt_dict['veh_edge_tilt']
+        self.action_space = getattr(self.cfg_rl_waymo, 'action_space', 'grid')
+        if self.action_space == 'k_action':
+            raise NotImplementedError("AutoregressivePolicy does not yet support k_action action_space.")
 
 
     def get_data(self, gt_data_dict, preproc_data, dset, vehicles_to_evaluate, t):

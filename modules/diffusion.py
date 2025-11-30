@@ -11,7 +11,7 @@ from utils.diffusion_helpers import (
     Silent
 )
 from modules.ctg_arch import DiT
-from modules.diffusion_guidance import n_step_guided_p_sample, GoalGuide, CollisionGuide
+# from modules.diffusion_guidance import n_step_guided_p_sample, GoalGuide, CollisionGuide
 
 
 class GaussianDiffusion(nn.Module):

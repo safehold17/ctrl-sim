@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from utils.train_utils import weight_init
-from utils.layers import MLPLayer
+from utils.layers import MLPLayer, ResidualMLP
 import torch.nn.functional as F 
 from modules.map_encoder import MapEncoder
 
@@ -13,16 +13,22 @@ class Encoder(nn.Module):
         self.cfg = cfg
         self.cfg_model = self.cfg.model
         self.cfg_rl_waymo = self.cfg.dataset.waymo
-        self.action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.use_k_actions = getattr(self.cfg_rl_waymo, 'action_space', 'grid') == 'k_action'
+        self.use_residual_mlp = getattr(self.cfg_model, 'use_residual_mlp', False)
+        self.residual_layers = getattr(self.cfg_model, 'residual_mlp_layers', 2)
+        self.grid_action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.k_action_dim = getattr(self.cfg_rl_waymo, 'k_action_vocab_size', None)
+        if self.use_k_actions and self.k_action_dim is None:
+            raise ValueError("cfg.dataset.waymo.k_action_vocab_size must be set when action_space is k_action.")
+        self.action_dim = self.k_action_dim if self.use_k_actions else self.grid_action_dim
 
         if self.cfg_model.use_map:
             self.map_encoder = MapEncoder(self.cfg)
 
-        self.embed_state = MLPLayer(self.cfg_model.state_dim, self.cfg_model.hidden_dim, self.cfg_model.hidden_dim)
-        self.embed_goal = MLPLayer(self.cfg_rl_waymo.goal_dim, self.cfg_model.hidden_dim, self.cfg_model.hidden_dim)
-        self.embed_state_goal = nn.Linear(self.cfg_model.hidden_dim * 2, self.cfg_model.hidden_dim)
-        self.embed_action = nn.Embedding(int(self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization), 
-                                            self.cfg_model.hidden_dim)
+        self.embed_state = self._build_mlp(self.cfg_model.state_dim, self.cfg_model.hidden_dim)
+        self.embed_goal = self._build_mlp(self.cfg_rl_waymo.goal_dim, self.cfg_model.hidden_dim)
+        self.embed_state_goal = self._build_mlp(self.cfg_model.hidden_dim * 2, self.cfg_model.hidden_dim)
+        self.embed_action = nn.Embedding(int(self.action_dim), self.cfg_model.hidden_dim)
         
         if self.cfg_model.decision_transformer:
             self.embed_rtg_goal = nn.Linear(1, self.cfg_model.hidden_dim)
@@ -47,6 +53,15 @@ class Encoder(nn.Module):
         self.apply(weight_init)
 
 
+    def _build_mlp(self, input_dim, output_dim):
+        if self.use_residual_mlp:
+            return ResidualMLP(input_dim=input_dim,
+                               hidden_dim=self.cfg_model.hidden_dim,
+                               n_hidden=self.residual_layers,
+                               output_dim=output_dim)
+        return MLPLayer(input_dim, self.cfg_model.hidden_dim, output_dim)
+
+
     def forward(self, data, eval):
         # focal_idx_in_model = data['focal_idx_in_model']
         agent_states = data['agent'].agent_states
@@ -56,7 +71,12 @@ class Encoder(nn.Module):
         agent_types = data['agent'].agent_types
         goals = data['agent'].goals
             
-        actions = data['agent'].actions
+        if self.use_k_actions:
+            if not hasattr(data['agent'], 'k_actions'):
+                raise ValueError("action_space is set to k_action but 'k_actions' not found in data.")
+            actions = data['agent'].k_actions
+        else:
+            actions = data['agent'].actions
         agent_ids = torch.arange(self.cfg_rl_waymo.max_num_agents).to(agent_states.device)
         # [batch_size, n_agents, timesteps]
         agent_ids = agent_ids.unsqueeze(0).unsqueeze(2).repeat(batch_size, 1, agent_states.shape[2])

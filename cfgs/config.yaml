@@ -1,5 +1,5 @@
-dataset_root: /scratch
-project_root: /home/ctrl-sim
+dataset_root: /home/chen/workspace/test-ctrlsim/ctrl-sim
+project_root: /home/chen/workspace/test-ctrlsim/ctrl-sim
 nocturne_waymo_data_folder: ${dataset_root}/nocturne_waymo
 nocturne_waymo_train_folder: ${nocturne_waymo_data_folder}/formatted_json_v2_no_tl_train
 nocturne_waymo_val_folder: ${nocturne_waymo_data_folder}/formatted_json_v2_no_tl_valid

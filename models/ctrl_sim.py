@@ -25,7 +25,12 @@ class CtRLSim(pl.LightningModule):
         self.cfg = cfg 
         self.cfg_model = self.cfg.model
         self.cfg_rl_waymo = self.cfg.dataset.waymo
-        self.action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.use_k_actions = getattr(self.cfg_rl_waymo, 'action_space', 'grid') == 'k_action'
+        self.grid_action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.k_action_dim = getattr(self.cfg_rl_waymo, 'k_action_vocab_size', None)
+        if self.use_k_actions and self.k_action_dim is None:
+            raise ValueError("cfg.dataset.waymo.k_action_vocab_size must be set when action_space is k_action.")
+        self.action_dim = self.k_action_dim if self.use_k_actions else self.grid_action_dim
         self.seq_len = self.cfg_rl_waymo.train_context_length
         self.encoder = Encoder(self.cfg)
         self.decoder = Decoder(self.cfg)
@@ -60,7 +65,12 @@ class CtRLSim(pl.LightningModule):
                 existence_mask = moving_mask * existence_mask 
 
             logits = logits.view(B * T, C)
-            actions = data['agent'].actions[:, :, 1:].reshape(-1)
+            if self.use_k_actions:
+                if not hasattr(data['agent'], 'k_actions'):
+                    raise ValueError("k_action targets missing in batch while action_space is k_action.")
+                actions = data['agent'].k_actions[:, :, 1:].reshape(-1)
+            else:
+                actions = data['agent'].actions[:, :, 1:].reshape(-1)
             existence_mask = existence_mask.view(-1)
             loss_actions = F.cross_entropy(logits.float(), actions.long(), reduction='none')
             loss_actions = loss_actions * existence_mask.float()
@@ -77,7 +87,12 @@ class CtRLSim(pl.LightningModule):
                 existence_mask = moving_mask * existence_mask # mask out non-moving agents
             
             logits = logits.view(B * T, C)
-            actions = data['agent'].actions.view(-1)
+            if self.use_k_actions:
+                if not hasattr(data['agent'], 'k_actions'):
+                    raise ValueError("k_action targets missing in batch while action_space is k_action.")
+                actions = data['agent'].k_actions.view(-1)
+            else:
+                actions = data['agent'].actions.view(-1)
             existence_mask = existence_mask.view(-1)
             loss_actions = F.cross_entropy(logits.float(), actions.long(), reduction='none')
             loss_actions = loss_actions * existence_mask.float()
@@ -280,6 +295,5 @@ class CtRLSim(pl.LightningModule):
         return [optimizer], {"scheduler": scheduler,
                              "interval": "step",
                              "frequency": 1}
-
 
 

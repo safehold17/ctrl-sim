@@ -275,7 +275,7 @@ class RLWaymoDataset(Dataset):
         return all_rewards
 
     
-    def select_relevant_agents(self, agent_states, agent_types, actions, rtgs, goals, origin_agent_idx, timestep, moving_agent_mask, relevant_agent_idxs=None):
+    def select_relevant_agents(self, agent_states, agent_types, actions, rtgs, goals, origin_agent_idx, timestep, moving_agent_mask, relevant_agent_idxs=None, k_actions=None):
         origin_states = agent_states[origin_agent_idx, timestep, :2].reshape(1, -1)
         dist_to_origin = np.linalg.norm(origin_states - agent_states[:, timestep, :2], axis=-1)
         valid_agents = np.where(dist_to_origin < self.cfg_dataset.agent_dist_threshold)[0]
@@ -286,6 +286,9 @@ class RLWaymoDataset(Dataset):
         final_rtgs = np.zeros((self.cfg_dataset.max_num_agents, *rtgs[0].shape))
         final_goals = np.zeros((self.cfg_dataset.max_num_agents, *goals[0].shape))
         final_moving_agent_mask = np.zeros(self.cfg_dataset.max_num_agents)
+        final_k_actions = None
+        if k_actions is not None:
+            final_k_actions = np.zeros((self.cfg_dataset.max_num_agents, *k_actions[0].shape))
 
         if relevant_agent_idxs is None or len(relevant_agent_idxs) == 0:
             closest_ag_ids = np.argsort(dist_to_origin)[:self.cfg_dataset.max_num_agents]
@@ -307,15 +310,21 @@ class RLWaymoDataset(Dataset):
         final_rtgs[:len(closest_ag_ids)] = rtgs[closest_ag_ids]
         final_goals[:len(closest_ag_ids)] = goals[closest_ag_ids]
         final_moving_agent_mask[:len(closest_ag_ids)] = moving_agent_mask[closest_ag_ids]
+        if k_actions is not None:
+            final_k_actions[:len(closest_ag_ids)] = k_actions[closest_ag_ids]
 
         # idx of origin agent in new state tensors
         new_origin_agent_idx = np.where(closest_ag_ids == origin_agent_idx)[0][0]
         if relevant_agent_idxs is None:
+            if k_actions is not None:
+                return final_agent_states, final_agent_types, final_actions, final_rtgs, final_goals, final_moving_agent_mask, final_k_actions, new_origin_agent_idx
             return final_agent_states, final_agent_types, final_actions, final_rtgs, final_goals, final_moving_agent_mask, new_origin_agent_idx
         else:
             new_agent_idx_dict = {}
             for new_idx, old_idx in enumerate(closest_ag_ids):
                 new_agent_idx_dict[old_idx] = new_idx
+            if k_actions is not None:
+                return final_agent_states, final_agent_types, final_actions, final_rtgs, final_goals, final_moving_agent_mask, final_k_actions, new_agent_idx_dict, relevant_agent_idxs
             return final_agent_states, final_agent_types, final_actions, final_rtgs, final_goals, final_moving_agent_mask, new_agent_idx_dict, relevant_agent_idxs
 
 

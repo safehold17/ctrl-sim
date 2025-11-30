@@ -1,0 +1,540 @@
+10 files changed
++230
+-35
+k_action_updates.md
++11
+-0
+
+# K-action integration notes
+
+- cfgs/dataset/waymo/base.yaml: added `action_space` toggle (`grid`/`k_action`), `k_action_vocab_size`, and default `k_action_vocab_path` so the rest of the stack knows which action space to build.
+- cfgs/model/base.yaml: model now mirrors the dataset `action_space` and defaults to `use_residual_mlp=True` with `residual_mlp_layers=2` for the new heads.
+- utils/layers.py: introduced `ResidualMLP`, matching the Scenario Dreamer blocks (LayerNorm + residual projection with optional output head) for stronger decoder/encoder heads.
+- modules/encoder.py: action embedding dimension now follows the chosen action space; state/goal embeddings and action heads switch to `ResidualMLP`; when `action_space=k_action` the encoder consumes `data['agent'].k_actions` and raises if they are missing.
+- modules/decoder.py: dual heads (`grid_action_preds` and `k_action_preds`) built with `ResidualMLP`; `preds['action_preds']` is selected from the configured action space, while RTG/future-state heads also use residual blocks. A missing k-action head when requested raises a clear error.
+- models/ctrl_sim.py: action_dim is derived from the selected action space; losses now supervise `k_actions` when configured, with guards for missing tokens.
+- datasets/rl_waymo/dataset_ctrl_sim.py: during preprocessing/load, `k_action` tokens are pulled from stored pickles or raw JSON (via `_load_k_actions_from_raw`); they are filtered/normalized alongside other tensors and stored as `agent.k_actions` (and saved to new pickles). If `action_space=k_action` but tokens are absent, an explicit error is raised.
+- policies/autoregressive_policy.py: early guard prevents running the current simulator policy with `k_action` until a k-disk execution path is added.
+- New file (this note): documents where the action-space toggle touches the pipeline and why, to guide future edits or reprocessing.
+base.yaml
++4
+-1
+
+accel_discretization: 20
+steer_discretization: 50 
+rtg_discretization: 350
+action_space: grid # options: grid, k_action
+k_action_vocab_size: 384
+k_action_vocab_path: '${project_root}/K-disks actions/k_disks_vocab_384_10Hz_seed42.pkl'
+
+preprocess_real_data: False
+preprocess_simulated_data: False
+goal_dim: 5
+remove_shaped_goal: True
+remove_shaped_veh_reward: False
+remove_shaped_edge_reward: False
+remove_shaped_edge_reward: False
+base.yaml
++3
+-0
+
+map_attr: 3
+num_road_types: 8
+no_actions: False
+action_space: ${dataset.waymo.action_space}
+num_heads: 8
+num_reward_components: 3
+dim_feedforward: 1024
+il: False
+ctg_plus_plus: False
+decision_transformer: False
+use_residual_mlp: True
+residual_mlp_layers: 2
+dataset.py
++11
+-2
+
+        return all_rewards
+
+    
+    def select_relevant_agents(self, agent_states, agent_types, actions, rtgs, goals, origin_agent_idx, timestep, moving_agent_mask, relevant_agent_idxs=None):
+    def select_relevant_agents(self, agent_states, agent_types, actions, rtgs, goals, origin_agent_idx, timestep, moving_agent_mask, relevant_agent_idxs=None, k_actions=None):
+        origin_states = agent_states[origin_agent_idx, timestep, :2].reshape(1, -1)
+        dist_to_origin = np.linalg.norm(origin_states - agent_states[:, timestep, :2], axis=-1)
+        valid_agents = np.where(dist_to_origin < self.cfg_dataset.agent_dist_threshold)[0]
+        final_rtgs = np.zeros((self.cfg_dataset.max_num_agents, *rtgs[0].shape))
+        final_goals = np.zeros((self.cfg_dataset.max_num_agents, *goals[0].shape))
+        final_moving_agent_mask = np.zeros(self.cfg_dataset.max_num_agents)
+        final_k_actions = None
+        if k_actions is not None:
+            final_k_actions = np.zeros((self.cfg_dataset.max_num_agents, *k_actions[0].shape))
+
+        if relevant_agent_idxs is None or len(relevant_agent_idxs) == 0:
+            closest_ag_ids = np.argsort(dist_to_origin)[:self.cfg_dataset.max_num_agents]
+        final_rtgs[:len(closest_ag_ids)] = rtgs[closest_ag_ids]
+        final_goals[:len(closest_ag_ids)] = goals[closest_ag_ids]
+        final_moving_agent_mask[:len(closest_ag_ids)] = moving_agent_mask[closest_ag_ids]
+        if k_actions is not None:
+            final_k_actions[:len(closest_ag_ids)] = k_actions[closest_ag_ids]
+
+        # idx of origin agent in new state tensors
+        new_origin_agent_idx = np.where(closest_ag_ids == origin_agent_idx)[0][0]
+        if relevant_agent_idxs is None:
+            if k_actions is not None:
+                return final_agent_states, final_agent_types, final_actions, final_rtgs, final_goals, final_moving_agent_mask, final_k_actions, new_origin_agent_idx
+            return final_agent_states, final_agent_types, final_actions, final_rtgs, final_goals, final_moving_agent_mask, new_origin_agent_idx
+        else:
+            new_agent_idx_dict = {}
+            for new_idx, old_idx in enumerate(closest_ag_ids):
+                new_agent_idx_dict[old_idx] = new_idx
+            if k_actions is not None:
+                return final_agent_states, final_agent_types, final_actions, final_rtgs, final_goals, final_moving_agent_mask, final_k_actions, new_agent_idx_dict, relevant_agent_idxs
+            return final_agent_states, final_agent_types, final_actions, final_rtgs, final_goals, final_moving_agent_mask, new_agent_idx_dict, relevant_agent_idxs
+
+
+
+    
+    def len(self):
+        return self.dset_len
+        return self.dset_len
+dataset_ctrl_sim.py
++54
+-5
+
+        super(RLWaymoDatasetCtRLSim, self).__init__(cfg, split_name, mode)
+
+    
+    def _get_raw_file_name(self, idx):
+        return os.path.splitext(os.path.basename(self.files[idx]))[0]
+
+
+    def _extract_k_actions(self, agents_data):
+        k_actions = []
+        for agent in agents_data:
+            if 'k_action' not in agent:
+                return None
+            k_actions.append(agent['k_action'])
+        if len(k_actions) == 0:
+            return None
+        return np.array(k_actions, dtype=int)
+
+
+    def _load_k_actions_from_raw(self, raw_file_name):
+        raw_json_path = os.path.join(self.cfg_dataset.dataset_path, f"{self.split_name}", f"{raw_file_name}.json")
+        if not os.path.exists(raw_json_path):
+            return None
+        with open(raw_json_path, 'r') as f:
+            raw_data = json.load(f)
+        if 'objects' not in raw_data:
+            return None
+        return self._extract_k_actions(raw_data['objects'])
+
+
+    def select_random_origin_agent(self, agent_states, moving_mask):
+        # search for moving agent that exists at first timestep
+        valid_idxs = np.where((agent_states[:, 0, -1] == 1) * moving_mask)[0]
+    
+    def get_data(self, data, idx):
+        if self.preprocess:
+            raw_file_name = self._get_raw_file_name(idx)
+            idx = data['idx']
+            num_agents = data['num_agents']
+            road_points = data['road_points']
+            road_types = data['road_types']
+            ag_data = data['ag_data']
+            ag_actions = data['ag_actions']
+            ag_k_actions = data.get('ag_k_actions', None)
+            ag_types = data['ag_types']
+            last_exist_timesteps = data['last_exist_timesteps']
+            ag_rewards = data['ag_rewards']
+            veh_veh_dist_rewards = data['veh_veh_dist_rewards']
+            filtered_ag_ids = data['filtered_ag_ids']
+            ag_goals = data['ag_goals']
+            if ag_k_actions is None:
+                ag_k_actions = self._load_k_actions_from_raw(raw_file_name)
+            if ag_k_actions is not None:
+                ag_k_actions = np.array(ag_k_actions, dtype=int)
+            
+        else:
+            agent_data = data['objects']
+
+            road_points, road_types, road_edge_polylines = self.get_roads(data)
+            ag_data, ag_actions, ag_rewards, ag_types, ag_goals, parked_ids, incomplete_ids, last_exist_timesteps = self.extract_rawdata(agent_data)
+            ag_k_actions = self._extract_k_actions(agent_data)
+            # zero out reward when timestep does not exist
+            veh_edge_dist_rewards = self.compute_dist_to_nearest_road_edge_rewards(ag_data.copy(), road_edge_polylines) * ag_data[:, :, -1]
+            veh_veh_dist_rewards = self.compute_dist_to_nearest_vehicle_rewards(ag_data.copy()) * ag_data[:, :, -1]
+            filtered_ag_ids = list(filter(lambda x: x not in incomplete_ids, raw_ag_ids))
+            assert len(filtered_ag_ids) > 0
+            
+            raw_file_name = os.path.splitext(os.path.basename(self.files[idx]))[0]
+            raw_file_name = self._get_raw_file_name(idx)
+            to_pickle = dict()
+            to_pickle['idx'] = idx
+            to_pickle['num_agents'] = num_agents 
+            to_pickle['road_types'] = road_types
+            to_pickle['ag_data'] = ag_data 
+            to_pickle['ag_actions'] = ag_actions 
+            if ag_k_actions is not None:
+                to_pickle['ag_k_actions'] = ag_k_actions
+            to_pickle['ag_types'] = ag_types 
+            to_pickle['last_exist_timesteps'] = last_exist_timesteps 
+            to_pickle['veh_edge_dist_rewards'] = veh_edge_dist_rewards
+        agent_states = ag_data[filtered_ag_ids, origin_t:origin_t+self.cfg_dataset.train_context_length]
+        agent_types = ag_types[filtered_ag_ids]
+        actions = ag_actions[filtered_ag_ids, origin_t:origin_t+self.cfg_dataset.train_context_length]
+        k_actions = None
+        if ag_k_actions is not None:
+            k_actions = np.array(ag_k_actions)[filtered_ag_ids, origin_t:origin_t+self.cfg_dataset.train_context_length]
+        rtgs = rtgs[filtered_ag_ids, origin_t:origin_t+self.cfg_dataset.train_context_length]
+        if getattr(self.cfg_dataset, 'action_space', 'grid') == 'k_action' and k_actions is None:
+            raise ValueError(f"k_action tokens not found for sample {raw_file_name} while action_space is k_action.")
+
+        # filter for agents that move at least 0.05 metres
+        moving_agent_mask = np.isin(filtered_ag_ids, moving_ids)
+        # randomly choose moving agent to be at origin
+        origin_agent_idx = self.select_random_origin_agent(agent_states, moving_agent_mask)
+
+        agent_states, agent_types, actions, rtgs, goals, moving_agent_mask, new_origin_agent_idx = self.select_relevant_agents(agent_states, agent_types, actions, rtgs, goals, origin_agent_idx, 0, moving_agent_mask)
+        if k_actions is not None:
+            (agent_states, agent_types, actions, rtgs, goals, moving_agent_mask,
+             k_actions, new_origin_agent_idx) = self.select_relevant_agents(agent_states, agent_types, actions, rtgs, goals, origin_agent_idx, 0, moving_agent_mask, k_actions=k_actions)
+        else:
+            agent_states, agent_types, actions, rtgs, goals, moving_agent_mask, new_origin_agent_idx = self.select_relevant_agents(agent_states, agent_types, actions, rtgs, goals, origin_agent_idx, 0, moving_agent_mask)
+        actions = self.discretize_actions(actions)
+        if k_actions is not None:
+            k_actions = k_actions.astype(int)
+        if not self.cfg_model.decision_transformer:
+            rtgs = self.discretize_rtgs(rtgs)
+        
+            d = dict()
+            d['idx'] = idx
+            # need to add batch dim as pytorch_geometric batches along first dimension of torch Tensors
+            d['agent'] = from_numpy({
+            agent_dict = {
+                'agent_states': add_batch_dim(agent_states),
+                'agent_types': add_batch_dim(agent_types), 
+                'goals': add_batch_dim(goals),
+                'rtgs': add_batch_dim(rtgs),
+                'timesteps': add_batch_dim(timesteps),
+                'moving_agent_mask': add_batch_dim(moving_agent_mask)
+            })
+            }
+            if k_actions is not None:
+                agent_dict['k_actions'] = add_batch_dim(k_actions)
+            d['agent'] = from_numpy(agent_dict)
+            d['map'] = from_numpy({
+                'road_points': add_batch_dim(road_points),
+                'road_types': add_batch_dim(road_types)
+        break
+
+if __name__ == '__main__':
+    main()
+    main()
+ctrl_sim.py
++18
+-4
+
+        self.cfg = cfg 
+        self.cfg_model = self.cfg.model
+        self.cfg_rl_waymo = self.cfg.dataset.waymo
+        self.action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.use_k_actions = getattr(self.cfg_rl_waymo, 'action_space', 'grid') == 'k_action'
+        self.grid_action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.k_action_dim = getattr(self.cfg_rl_waymo, 'k_action_vocab_size', None)
+        if self.use_k_actions and self.k_action_dim is None:
+            raise ValueError("cfg.dataset.waymo.k_action_vocab_size must be set when action_space is k_action.")
+        self.action_dim = self.k_action_dim if self.use_k_actions else self.grid_action_dim
+        self.seq_len = self.cfg_rl_waymo.train_context_length
+        self.encoder = Encoder(self.cfg)
+        self.decoder = Decoder(self.cfg)
+                existence_mask = moving_mask * existence_mask 
+
+            logits = logits.view(B * T, C)
+            actions = data['agent'].actions[:, :, 1:].reshape(-1)
+            if self.use_k_actions:
+                if not hasattr(data['agent'], 'k_actions'):
+                    raise ValueError("k_action targets missing in batch while action_space is k_action.")
+                actions = data['agent'].k_actions[:, :, 1:].reshape(-1)
+            else:
+                actions = data['agent'].actions[:, :, 1:].reshape(-1)
+            existence_mask = existence_mask.view(-1)
+            loss_actions = F.cross_entropy(logits.float(), actions.long(), reduction='none')
+            loss_actions = loss_actions * existence_mask.float()
+                existence_mask = moving_mask * existence_mask # mask out non-moving agents
+            
+            logits = logits.view(B * T, C)
+            actions = data['agent'].actions.view(-1)
+            if self.use_k_actions:
+                if not hasattr(data['agent'], 'k_actions'):
+                    raise ValueError("k_action targets missing in batch while action_space is k_action.")
+                actions = data['agent'].k_actions.view(-1)
+            else:
+                actions = data['agent'].actions.view(-1)
+            existence_mask = existence_mask.view(-1)
+            loss_actions = F.cross_entropy(logits.float(), actions.long(), reduction='none')
+            loss_actions = loss_actions * existence_mask.float()
+        return [optimizer], {"scheduler": scheduler,
+                             "interval": "step",
+                             "frequency": 1}
+
+
+
+decoder.py
++50
+-12
+
+import torch.nn as nn
+
+from utils.train_utils import weight_init, get_causal_mask
+from utils.layers import MLPLayer
+from utils.layers import MLPLayer, ResidualMLP
+import torch.nn.functional as F 
+
+class Decoder(nn.Module):
+        self.cfg = cfg
+        self.cfg_model = self.cfg.model
+        self.cfg_rl_waymo = self.cfg.dataset.waymo
+        self.action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.use_k_actions = getattr(self.cfg_rl_waymo, 'action_space', 'grid') == 'k_action'
+        self.use_residual_mlp = getattr(self.cfg_model, 'use_residual_mlp', False)
+        self.residual_layers = getattr(self.cfg_model, 'residual_mlp_layers', 2)
+        self.grid_action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.k_action_dim = getattr(self.cfg_rl_waymo, 'k_action_vocab_size', None)
+        if self.use_k_actions and self.k_action_dim is None:
+            raise ValueError("cfg.dataset.waymo.k_action_vocab_size must be set when action_space is k_action.")
+        self.action_dim = self.k_action_dim if self.use_k_actions else self.grid_action_dim
+        self.transformer_decoder = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=self.cfg_model.hidden_dim, 
+                                                                                    dim_feedforward=self.cfg_model.dim_feedforward,
+                                                                                    nhead=self.cfg_model.num_heads,
+                                                                                    batch_first=True), 
+                                                                                    num_layers=self.cfg_model.num_decoder_layers)
+        self.predict_action = MLPLayer(self.cfg_model.hidden_dim, self.cfg_model.hidden_dim, self.action_dim)
+        self.predict_grid_action = self._build_mlp(self.cfg_model.hidden_dim, self.grid_action_dim)
+        self.predict_k_action = self._build_mlp(self.cfg_model.hidden_dim, self.k_action_dim) if self.k_action_dim is not None else None
+
+        if self.cfg_model.predict_rtg:
+            self.predict_rtg = MLPLayer(self.cfg_model.hidden_dim, self.cfg_model.hidden_dim, self.cfg_rl_waymo.rtg_discretization * self.cfg_model.num_reward_components)
+            self.predict_rtg = self._build_mlp(self.cfg_model.hidden_dim, self.cfg_rl_waymo.rtg_discretization * self.cfg_model.num_reward_components)
+
+        if self.cfg_model.predict_future_states:
+            self.predict_future_states = MLPLayer(self.cfg_model.hidden_dim, self.cfg_model.hidden_dim, self.cfg_rl_waymo.train_context_length * 2)
+            self.predict_future_states = self._build_mlp(self.cfg_model.hidden_dim, self.cfg_rl_waymo.train_context_length * 2, hidden_dim=self.cfg_model.hidden_dim)
+
+        if not (self.cfg_model.trajeglish or self.cfg_model.il):
+            num_types = 3
+        self.apply(weight_init)
+
+
+    def _build_mlp(self, input_dim, output_dim, hidden_dim=None):
+        hidden_dim = hidden_dim or self.cfg_model.hidden_dim
+        if self.use_residual_mlp:
+            return ResidualMLP(input_dim=input_dim,
+                               hidden_dim=hidden_dim,
+                               n_hidden=self.residual_layers,
+                               output_dim=output_dim)
+        return MLPLayer(input_dim, hidden_dim, output_dim)
+
+
+    def _reshape_actions(self, logits, batch_size, seq_len, action_dim):
+        if logits is None:
+            return None
+        return logits.reshape(batch_size, seq_len, self.cfg_rl_waymo.max_num_agents, action_dim).permute(0, 2, 1, 3)
+
+
+    def forward(self, data, scene_enc, eval=False):
+        agent_states = data['agent'].agent_states
+        batch_size = agent_states.shape[0]
+        if not (self.cfg_model.trajeglish or self.cfg_model.il):
+            # [batch_size, 3, num_timesteps * num_agents, hidden_dim]
+            output = output.reshape(batch_size, seq_len*self.cfg_rl_waymo.max_num_agents, 3, self.cfg_model.hidden_dim).permute(0, 2, 1, 3)
+            action_preds = self.predict_action(output[:, 1])
+            action_token = output[:, 1]
+        elif self.cfg_model.trajeglish:
+            output = output.reshape(batch_size, seq_len*self.cfg_rl_waymo.max_num_agents, 1, self.cfg_model.hidden_dim).permute(0, 2, 1, 3)
+            action_preds = self.predict_action(output[:, 0])
+            action_token = output[:, 0]
+        else:
+            output = output.reshape(batch_size, seq_len*self.cfg_rl_waymo.max_num_agents, 2, self.cfg_model.hidden_dim).permute(0, 2, 1, 3)
+            action_preds = self.predict_action(output[:, 0])
+        # [batch_size, num_agents, num_timesteps, action_dim]
+        action_preds = action_preds.reshape(batch_size, seq_len, self.cfg_rl_waymo.max_num_agents, self.action_dim).permute(0, 2, 1, 3)
+        preds['action_preds'] = action_preds
+            action_token = output[:, 0]
+
+        grid_action_logits = self.predict_grid_action(action_token) if self.predict_grid_action is not None else None
+        k_action_logits = self.predict_k_action(action_token) if self.predict_k_action is not None else None
+        grid_action_preds = self._reshape_actions(grid_action_logits, batch_size, seq_len, self.grid_action_dim)
+        k_action_preds = self._reshape_actions(k_action_logits, batch_size, seq_len, self.k_action_dim) if self.predict_k_action is not None else None
+
+        if grid_action_preds is not None:
+            preds['grid_action_preds'] = grid_action_preds
+        if k_action_preds is not None:
+            preds['k_action_preds'] = k_action_preds
+
+        if self.use_k_actions:
+            if k_action_preds is None:
+                raise ValueError("k_action head is not initialized but action_space is k_action.")
+            preds['action_preds'] = k_action_preds
+        else:
+            preds['action_preds'] = grid_action_preds
+
+        if self.cfg_model.predict_future_states:
+            state_preds = self.predict_future_states(output[:, 2])
+            state_preds = state_preds.reshape(batch_size, seq_len, self.cfg_rl_waymo.max_num_agents, self.cfg_rl_waymo.train_context_length * 2).permute(0, 2, 1, 3)
+            rtg_preds = rtg_preds.reshape(batch_size, seq_len, self.cfg_rl_waymo.max_num_agents, self.cfg_rl_waymo.rtg_discretization * self.cfg_model.num_reward_components).permute(0, 2, 1, 3)
+            preds['rtg_preds'] = rtg_preds
+
+        return preds
+        return preds
+encoder.py
++29
+-9
+
+import torch.nn as nn
+
+from utils.train_utils import weight_init
+from utils.layers import MLPLayer
+from utils.layers import MLPLayer, ResidualMLP
+import torch.nn.functional as F 
+from modules.map_encoder import MapEncoder
+
+        self.cfg = cfg
+        self.cfg_model = self.cfg.model
+        self.cfg_rl_waymo = self.cfg.dataset.waymo
+        self.action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.use_k_actions = getattr(self.cfg_rl_waymo, 'action_space', 'grid') == 'k_action'
+        self.use_residual_mlp = getattr(self.cfg_model, 'use_residual_mlp', False)
+        self.residual_layers = getattr(self.cfg_model, 'residual_mlp_layers', 2)
+        self.grid_action_dim = self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization
+        self.k_action_dim = getattr(self.cfg_rl_waymo, 'k_action_vocab_size', None)
+        if self.use_k_actions and self.k_action_dim is None:
+            raise ValueError("cfg.dataset.waymo.k_action_vocab_size must be set when action_space is k_action.")
+        self.action_dim = self.k_action_dim if self.use_k_actions else self.grid_action_dim
+
+        if self.cfg_model.use_map:
+            self.map_encoder = MapEncoder(self.cfg)
+
+        self.embed_state = MLPLayer(self.cfg_model.state_dim, self.cfg_model.hidden_dim, self.cfg_model.hidden_dim)
+        self.embed_goal = MLPLayer(self.cfg_rl_waymo.goal_dim, self.cfg_model.hidden_dim, self.cfg_model.hidden_dim)
+        self.embed_state_goal = nn.Linear(self.cfg_model.hidden_dim * 2, self.cfg_model.hidden_dim)
+        self.embed_action = nn.Embedding(int(self.cfg_rl_waymo.accel_discretization * self.cfg_rl_waymo.steer_discretization), 
+                                            self.cfg_model.hidden_dim)
+        self.embed_state = self._build_mlp(self.cfg_model.state_dim, self.cfg_model.hidden_dim)
+        self.embed_goal = self._build_mlp(self.cfg_rl_waymo.goal_dim, self.cfg_model.hidden_dim)
+        self.embed_state_goal = self._build_mlp(self.cfg_model.hidden_dim * 2, self.cfg_model.hidden_dim)
+        self.embed_action = nn.Embedding(int(self.action_dim), self.cfg_model.hidden_dim)
+        
+        if self.cfg_model.decision_transformer:
+            self.embed_rtg_goal = nn.Linear(1, self.cfg_model.hidden_dim)
+        self.apply(weight_init)
+
+
+    def _build_mlp(self, input_dim, output_dim):
+        if self.use_residual_mlp:
+            return ResidualMLP(input_dim=input_dim,
+                               hidden_dim=self.cfg_model.hidden_dim,
+                               n_hidden=self.residual_layers,
+                               output_dim=output_dim)
+        return MLPLayer(input_dim, self.cfg_model.hidden_dim, output_dim)
+
+
+    def forward(self, data, eval):
+        # focal_idx_in_model = data['focal_idx_in_model']
+        agent_states = data['agent'].agent_states
+        agent_types = data['agent'].agent_types
+        goals = data['agent'].goals
+            
+        actions = data['agent'].actions
+        if self.use_k_actions:
+            if not hasattr(data['agent'], 'k_actions'):
+                raise ValueError("action_space is set to k_action but 'k_actions' not found in data.")
+            actions = data['agent'].k_actions
+        else:
+            actions = data['agent'].actions
+        agent_ids = torch.arange(self.cfg_rl_waymo.max_num_agents).to(agent_states.device)
+        # [batch_size, n_agents, timesteps]
+        agent_ids = agent_ids.unsqueeze(0).unsqueeze(2).repeat(batch_size, 1, agent_states.shape[2])
+            'stacked_embeddings': stacked_embeddings, 
+            'encoder_embeddings': encoder_embeddings, 
+            'src_key_padding_mask': src_key_padding_mask
+        }
+        }
+autoregressive_policy.py
++4
+-1
+
+            self.goal_tilt = tilt_dict['goal_tilt']
+            self.veh_veh_tilt = tilt_dict['veh_veh_tilt']
+            self.veh_edge_tilt = tilt_dict['veh_edge_tilt']
+        self.action_space = getattr(self.cfg_rl_waymo, 'action_space', 'grid')
+        if self.action_space == 'k_action':
+            raise NotImplementedError("AutoregressivePolicy does not yet support k_action action_space.")
+
+
+    def get_data(self, gt_data_dict, preproc_data, dset, vehicles_to_evaluate, t):
+            veh.brake(np.abs(acceleration))
+        veh.steering = steering
+
+        return veh, [acceleration, steering]
+        return veh, [acceleration, steering]
+layers.py
++46
+-1
+
+
+from utils.train_utils import weight_init
+
+
+class ResidualMLP(nn.Module):
+    """
+    Residual feed-forward block with configurable depth.
+
+    Args:
+        input_dim: size of the input features.
+        hidden_dim: size of the hidden/residual features.
+        n_hidden: number of Linear -> LayerNorm blocks before the residual add.
+        output_dim: if provided, applies an extra Linear(hidden_dim, output_dim)
+                    after the residual + ReLU. If None, returns hidden_dim.
+    """
+
+    def __init__(self, input_dim, hidden_dim, n_hidden=2, output_dim=None):
+        super().__init__()
+        assert n_hidden >= 1, "ResidualMLP needs at least one hidden layer"
+
+        self.linears = nn.ModuleList(
+            [nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim) for i in range(n_hidden)]
+        )
+        self.norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(n_hidden)])
+
+        self.transform_linear = nn.Linear(input_dim, hidden_dim)
+        self.transform_norm = nn.LayerNorm(hidden_dim)
+
+        self.linear_out = nn.Linear(hidden_dim, output_dim) if output_dim is not None else None
+        self.relu = nn.ReLU(inplace=True)
+        self.apply(weight_init)
+
+    def forward(self, x):
+        out = x
+        for i, (lin, norm) in enumerate(zip(self.linears, self.norms)):
+            out = lin(out)
+            out = norm(out)
+            if i < len(self.linears) - 1:
+                out = self.relu(out)
+
+        res = self.transform_norm(self.transform_linear(x))
+        out = self.relu(out + res)
+
+        if self.linear_out is not None:
+            out = self.linear_out(out)
+        return out
+
+
+class MLPLayer(nn.Module):
+
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        self.apply(weight_init)
+
+    def forward(self, x):
+        return self.mlp(x)
+        return self.mlp(x)

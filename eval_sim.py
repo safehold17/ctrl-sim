@@ -33,6 +33,7 @@ def main(cfg):
     
     if name == 'ctg_plus_plus':
         model = CTGPlusPlus.load_from_checkpoint(model_path)
+        model = model.cuda()
         policy = CTGPlusPlusPolicy(cfg=cfg, 
                                    model_path=model_path,
                                    model=model,
@@ -50,6 +51,7 @@ def main(cfg):
                                    history_steps=cfg.eval.history_steps)
     else:
         model = CtRLSim.load_from_checkpoint(model_path)
+        model = model.cuda()
         policy = AutoregressivePolicy(cfg=cfg, 
                                       model_path=model_path,
                                       model=model,

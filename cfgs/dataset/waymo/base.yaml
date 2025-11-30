@@ -41,6 +41,9 @@ max_num_road_pts_per_polyline: 100
 accel_discretization: 20
 steer_discretization: 50 
 rtg_discretization: 350
+action_space: k_action # options: grid, k_action
+k_action_vocab_size: 384
+k_action_vocab_path: '${project_root}/K-disks actions/k_disks_vocab_384_10Hz_seed42.pkl'
 
 preprocess_real_data: False
 preprocess_simulated_data: False

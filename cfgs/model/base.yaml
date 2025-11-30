@@ -2,6 +2,7 @@ hidden_dim: 256 # try 32, 64, 256, 512
 map_attr: 3
 num_road_types: 8
 no_actions: False
+action_space: ${dataset.waymo.action_space}
 num_heads: 8
 num_reward_components: 3
 dim_feedforward: 1024
@@ -17,3 +18,5 @@ trajeglish: False
 il: False
 ctg_plus_plus: False
 decision_transformer: False
+use_residual_mlp: True
+residual_mlp_layers: 2

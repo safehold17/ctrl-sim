@@ -1,0 +1,18 @@
+[2025-11-28 14:59:32,903][py.warnings][WARNING] - /home/chen/workspace/test-ctrlsim/ctrl-sim/evaluators/policy_evaluator.py:254: RuntimeWarning: Mean of empty slice.
+  metrics_dict['goal'] = np.array(self.goal_achieved_all).mean()
+
+[2025-11-28 14:59:32,904][py.warnings][WARNING] - /root/miniconda3/envs/test-ctrlsim/lib/python3.10/site-packages/numpy/core/_methods.py:190: RuntimeWarning: invalid value encountered in double_scalars
+  ret = ret.dtype.type(ret / rcount)
+
+[2025-11-28 14:59:32,904][py.warnings][WARNING] - /home/chen/workspace/test-ctrlsim/ctrl-sim/evaluators/policy_evaluator.py:255: RuntimeWarning: Mean of empty slice.
+  metrics_dict['collision_rate'] = np.array(self.collision_rate_scenario).mean()
+
+[2025-11-28 14:59:32,905][py.warnings][WARNING] - /home/chen/workspace/test-ctrlsim/ctrl-sim/evaluators/policy_evaluator.py:256: RuntimeWarning: Mean of empty slice.
+  metrics_dict['offroad_rate'] = np.array(self.offroad_rate_scenario).mean()
+
+[2025-11-28 14:59:32,905][py.warnings][WARNING] - /home/chen/workspace/test-ctrlsim/ctrl-sim/evaluators/policy_evaluator.py:258: RuntimeWarning: Mean of empty slice.
+  metrics_dict['fde'] = np.array(self.fdes_all).mean()
+
+[2025-11-28 14:59:32,905][py.warnings][WARNING] - /home/chen/workspace/test-ctrlsim/ctrl-sim/evaluators/policy_evaluator.py:259: RuntimeWarning: Mean of empty slice.
+  metrics_dict['ade'] = np.array(self.ades_all).mean()
+

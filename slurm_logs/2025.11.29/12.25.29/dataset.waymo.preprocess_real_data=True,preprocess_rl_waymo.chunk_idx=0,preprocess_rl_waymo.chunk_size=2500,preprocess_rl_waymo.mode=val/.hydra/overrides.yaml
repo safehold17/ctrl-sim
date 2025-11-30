@@ -1,0 +1,4 @@
+- preprocess_rl_waymo.chunk_idx=0
+- preprocess_rl_waymo.chunk_size=2500
+- preprocess_rl_waymo.mode=val
+- dataset.waymo.preprocess_real_data=True

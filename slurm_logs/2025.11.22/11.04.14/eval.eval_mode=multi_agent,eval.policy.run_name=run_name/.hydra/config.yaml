@@ -1,0 +1,232 @@
+dataset:
+  waymo:
+    dataset_path: ${dataset_root}/offline_rl
+    preprocess: true
+    preprocess_dir: ${dataset_root}/preprocess
+    train_context_length: 32
+    num_agent_types: 5
+    num_road_types: 8
+    map_attr: 2
+    k_attr: 7
+    agent_dist_threshold: 60.0
+    map_dist_threshold: 100.0
+    max_timestep: 90
+    parked_car_velocity_threshold: 0.05
+    max_accel: 10.0
+    min_accel: -10.0
+    max_steer: 0.7
+    min_steer: -0.7
+    max_veh_veh_distance: 15.0
+    dist_to_road_edge_scaling_factor: 15.0
+    veh_veh_collision_rew_multiplier: 10.0
+    veh_edge_collision_rew_multiplier: 10.0
+    pos_goal_shaped_min: 0
+    pos_goal_shaped_max: 0.2
+    pos_target_achieved_rew_multiplier: 10.0
+    moving_threshold: 0.05
+    min_rtg_pos: 0
+    max_rtg_pos: 10
+    min_rtg_yaw: 0
+    max_rtg_yaw: 110
+    min_rtg_vel: 0
+    max_rtg_vel: 110
+    min_rtg_veh: -10
+    max_rtg_veh: 90
+    min_rtg_road: -10
+    max_rtg_road: 90
+    max_num_agents: 24
+    max_num_road_polylines: 200
+    max_num_road_pts_per_polyline: 100
+    accel_discretization: 20
+    steer_discretization: 50
+    rtg_discretization: 350
+    preprocess_real_data: false
+    preprocess_simulated_data: false
+    simulated_dataset: ${dataset_root}/cat_offline_rl_data
+    simulated_dataset_preprocessed_dir: ${dataset_root}/preprocessed_cat
+    goal_dim: 5
+    remove_shaped_goal: true
+    remove_shaped_veh_reward: false
+    remove_shaped_edge_reward: false
+train:
+  seed: 0
+  accelerator: auto
+  devices: 4
+  max_steps: 200000
+  warmup_steps: 500
+  lr: 0.0005
+  weight_decay: 0.0001
+  check_val_every_n_epoch: 1
+  precision: 32-true
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  gradient_clip_val: 10.0
+  run_name: test
+  save_dir: /home/checkpoints
+  track: false
+  wandb_project: decepticons
+  wandb_entity: swish
+  finetuning: false
+datamodule:
+  train_batch_size: 16
+  val_batch_size: 16
+  num_workers: 6
+  pin_memory: true
+model:
+  hidden_dim: 256
+  map_attr: 3
+  num_road_types: 8
+  no_actions: false
+  num_heads: 8
+  num_reward_components: 3
+  dim_feedforward: 1024
+  dropout: 0.1
+  state_dim: 12
+  use_map: true
+  goal_dropout: 0.1
+  max_pool_map: true
+  supervise_moving: true
+  predict_rtg: true
+  attend_own_return_action: false
+  trajeglish: false
+  il: false
+  ctg_plus_plus: false
+  decision_transformer: false
+  num_transformer_encoder_layers: 2
+  num_decoder_layers: 4
+  predict_future_states: true
+  local_frame_predictions: false
+  loss_action_coef: 1.0
+  encode_initial_state: true
+eval:
+  policy:
+    use_rtg: true
+    predict_rtgs: true
+    discretize_rtgs: true
+    real_time_rewards: false
+    privileged_return: false
+    max_return: false
+    min_return: false
+    run_name: run_name
+    model_path: /home/chen/workspace/test-ctrlsim/ctrl-sim/checkpoints/model.ckpt
+    veh_veh_tilt: 0
+    veh_edge_tilt: 0
+    goal_tilt: 0
+    action_temperature: 1.0
+    nucleus_sampling: false
+    nucleus_threshold: 0.8
+    model: ctrl_sim
+    train:
+      finetuning: false
+  movie_path: ${project_root}/movie_frames
+  visualize: false
+  history_steps: 10
+  interesting_traj_len_threshold: 60
+  interesting_goal_dist_threshold: 10
+  interesting_timestep_diff_threshold: 20
+  multi_agent_eval_threshold: 8
+  num_files_to_evaluate: 1000
+  eval_mode: multi_agent
+  verbose: true
+  seed: 0
+  partitions: 1
+eval_planner_adversary:
+  adversary:
+    use_rtg: true
+    predict_rtgs: true
+    discretize_rtgs: true
+    real_time_rewards: false
+    privileged_return: false
+    max_return: false
+    min_return: false
+    run_name: ctrl_sim
+    model_path: /home/checkpoints/${eval.policy.run_name}/model.ckpt
+    veh_veh_tilt: -10
+    veh_edge_tilt: 0
+    goal_tilt: 0
+    action_temperature: 1.0
+    nucleus_sampling: false
+    nucleus_threshold: 0.8
+    model: ctrl_sim
+    train:
+      finetuning: false
+  planner:
+    use_rtg: true
+    predict_rtgs: true
+    discretize_rtgs: true
+    real_time_rewards: false
+    privileged_return: false
+    max_return: false
+    min_return: false
+    run_name: ctrl_sim
+    model_path: /home/checkpoints/${eval.policy.run_name}/model.ckpt
+    veh_veh_tilt: 10
+    veh_edge_tilt: 10
+    goal_tilt: 10
+    action_temperature: 1.0
+    nucleus_sampling: false
+    nucleus_threshold: 0.8
+    model: ctrl_sim
+    train:
+      finetuning: false
+  history_steps: 10
+  verbose: true
+  seed: 0
+  visualize: false
+  visualization_data_path: ${dataset_root}/viz_data_files
+  num_files_to_evaluate: 1000
+dataset_root: /home/chen/workspace/test-ctrlsim/ctrl-sim
+project_root: /home/chen/workspace/test-ctrlsim/ctrl-sim
+nocturne_waymo_data_folder: ${dataset_root}/nocturne_waymo
+nocturne_waymo_train_folder: ${nocturne_waymo_data_folder}/formatted_json_v2_no_tl_train
+nocturne_waymo_val_folder: ${nocturne_waymo_data_folder}/formatted_json_v2_no_tl_valid
+nocturne_waymo_val_interactive_folder: ${nocturne_waymo_data_folder}/formatted_json_v2_no_tl_valid_interactive
+offline_rl:
+  output_data_folder_train: ${dataset_root}/offline_rl/train
+  output_data_folder_val: ${dataset_root}/offline_rl/val
+  output_data_folder_val_interactive: ${dataset_root}/offline_rl/val_interactive
+  output_data_folder_test: ${dataset_root}/offline_rl/test
+  mode: train
+  chunk_idx: 0
+  chunk_size: 25000
+cat:
+  md_scenarios: ${dataset_root}/md_scenarios
+  valid_md_scenarios: ${dataset_root}/valid_md_scenarios
+  dict_path: ${dataset_root}/eval_planner_dict.pkl
+  num_files_to_collect: 5000
+  start_idx: 1006
+  output_dir: ${dataset_root}/cat_offline_rl_data
+preprocess_rl_waymo:
+  mode: train
+  chunk_idx: 0
+  chunk_size: 25000
+nocturne:
+  collision_fix: true
+  steps: 90
+  dt: 0.1
+  history_steps: 10
+  scenario:
+    start_time: 0
+    allow_non_vehicles: false
+    moving_threshold: 0.2
+    speed_threshold: 0.05
+    max_visible_objects: 16
+    max_visible_road_points: 1000
+    max_visible_traffic_lights: 20
+    max_visible_stop_signs: 4
+    sample_every_n: 1
+    road_edge_first: false
+  rew_cfg:
+    shared_reward: false
+    goal_tolerance: 0.5
+    reward_scaling: 1.0
+    collision_penalty: 0
+    shaped_goal_distance_scaling: 0.2
+    shaped_goal_distance: true
+    goal_distance_penalty: false
+    position_target: true
+    position_target_tolerance: 1.0
+    speed_target: true
+    speed_target_tolerance: 1.0
+    heading_target: true
+    heading_target_tolerance: 0.3

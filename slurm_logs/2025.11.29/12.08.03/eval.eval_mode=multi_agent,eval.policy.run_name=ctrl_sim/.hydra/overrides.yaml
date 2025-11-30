@@ -1,0 +1,2 @@
+- eval.policy.run_name=ctrl_sim
+- eval.eval_mode=multi_agent

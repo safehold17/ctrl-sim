@@ -11,7 +11,7 @@ from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 from pyvirtualdisplay import Display
 
-CONFIG_PATH = '/home/ctrl-sim/cfgs'
+CONFIG_PATH = '/home/chen/workspace/test-ctrlsim/ctrl-sim/cfgs'
 
 def get_scenario_dict(hydra_cfg):
     """Convert the `scenario` key in the hydra config to a true dict."""

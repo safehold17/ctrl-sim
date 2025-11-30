@@ -1,0 +1,26 @@
+{
+    "cmake.sourceDirectory": "/home/chen/workspace/test-ctrlsim/ctrl-sim/nocturne",
+    "files.associations": {
+        "array": "cpp",
+        "chrono": "cpp",
+        "compare": "cpp",
+        "functional": "cpp",
+        "ratio": "cpp",
+        "tuple": "cpp",
+        "type_traits": "cpp",
+        "utility": "cpp",
+        "variant": "cpp",
+        "__functional_base": "cpp",
+        "__functional_base_03": "cpp",
+        "__hash_table": "cpp",
+        "__tree": "cpp",
+        "__tuple": "cpp",
+        "algorithm": "cpp",
+        "filesystem": "cpp",
+        "forward_list": "cpp",
+        "limits": "cpp",
+        "memory": "cpp",
+        "random": "cpp",
+        "span": "cpp"
+    }
+}

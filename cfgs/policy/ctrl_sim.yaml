@@ -2,7 +2,7 @@ defaults:
 - base
 
 run_name: ctrl_sim
-model_path: /home/checkpoints/${eval.policy.run_name}/model.ckpt
+model_path: /home/chen/workspace/test-ctrlsim/ctrl-sim/checkpoints/model.ckpt
 veh_veh_tilt: 0
 veh_edge_tilt: 0
 goal_tilt: 0
