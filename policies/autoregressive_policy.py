@@ -4,7 +4,11 @@ import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import torch
 import time
+import pickle
+import os
 from policies.policy import Policy
+from utils.k_disks_helpers import forward_k_disks
+from utils.dynamics import BicycleModel
 
 class AutoregressivePolicy(Policy):
     def __init__(self, 
@@ -46,9 +50,28 @@ class AutoregressivePolicy(Policy):
             self.goal_tilt = tilt_dict['goal_tilt']
             self.veh_veh_tilt = tilt_dict['veh_veh_tilt']
             self.veh_edge_tilt = tilt_dict['veh_edge_tilt']
+        # Configure action space and load k-action vocabulary if needed
         self.action_space = getattr(self.cfg_rl_waymo, 'action_space', 'grid')
         if self.action_space == 'k_action':
-            raise NotImplementedError("AutoregressivePolicy does not yet support k_action action_space.")
+            vocab_path = getattr(self.cfg_rl_waymo, 'k_action_vocab_path', None)
+            if vocab_path is None or not os.path.exists(vocab_path):
+                raise FileNotFoundError(f"k_action_vocab_path not found: {vocab_path}")
+            
+            # Load k-disks vocabulary
+            with open(vocab_path, 'rb') as f:
+                vocab_data = pickle.load(f)
+                if 'V' not in vocab_data:
+                    raise KeyError(f"k_action vocabulary file missing 'V' key: {vocab_path}")
+                self.k_vocab = np.array(vocab_data['V'])
+            
+            # Load action space parameters for k-action mode
+            self.k_dt = getattr(self.cfg.nocturne, 'dt', 0.1)
+            self.max_steer = self.cfg_rl_waymo.max_steer
+            self.min_steer = self.cfg_rl_waymo.min_steer
+            self.min_accel = self.cfg_rl_waymo.min_accel
+            self.max_accel = self.cfg_rl_waymo.max_accel
+            
+            print(f"[K-Action] Loaded vocabulary with {len(self.k_vocab)} tokens from {vocab_path}")
 
 
     def get_data(self, gt_data_dict, preproc_data, dset, vehicles_to_evaluate, t):
@@ -147,15 +170,19 @@ class AutoregressivePolicy(Policy):
             
             d = dict()
             # need to add batch dim as pytorch_geometric batches along first dimension of torch Tensors
-            d['agent'] = from_numpy({
+            agent_dict = {
                 'agent_states': add_batch_dim(rel_ag_states),
                 'agent_types': add_batch_dim(rel_ag_types), 
                 'goals': add_batch_dim(rel_goals),
                 'actions': add_batch_dim(rel_actions),
                 'rtgs': add_batch_dim(rel_rtgs),
-                'timesteps': add_batch_dim(rel_timesteps), # TODO: clean this up
+                'timesteps': add_batch_dim(rel_timesteps),
                 'moving_agent_mask': add_batch_dim(rel_moving_agent_mask)
-            })
+            }
+            # Note: k_actions field not included in agent_dict during rollout
+            # This is expected - the model predicts k_action tokens from states/goals,
+            # and k_action_to_controls() converts tokens to control commands
+            d['agent'] = from_numpy(agent_dict)
             d['map'] = from_numpy({
                 'road_points': add_batch_dim(rel_road_points),
                 'road_types': add_batch_dim(rel_road_types)
@@ -238,9 +265,20 @@ class AutoregressivePolicy(Policy):
                 # sample from output distribution
                 next_action = torch.multinomial(next_action_dis, 1)
                 next_action = next_action.reshape(1, 1)
-                next_action_continuous = dset.undiscretize_actions(next_action.cpu().numpy())
-                vehicle_data_dict[veh_id][self.key_dict['next_acceleration']] = next_action_continuous[0,0,0]
-                vehicle_data_dict[veh_id][self.key_dict['next_steering']] = next_action_continuous[0,0,1]
+                
+                if self.action_space == 'k_action':
+                    action_token = int(next_action.item())
+                    # Validate action token is within vocabulary bounds
+                    if action_token < 0 or action_token >= len(self.k_vocab):
+                        raise ValueError(f"Invalid k-action token {action_token}, vocab size is {len(self.k_vocab)}")
+                    next_acceleration, next_steering = self.k_action_to_controls(veh_id, action_token, t)
+                else:
+                    next_action_continuous = dset.undiscretize_actions(next_action.cpu().numpy())
+                    next_acceleration = next_action_continuous[0, 0, 0]
+                    next_steering = next_action_continuous[0, 0, 1]
+                
+                vehicle_data_dict[veh_id][self.key_dict['next_acceleration']] = next_acceleration
+                vehicle_data_dict[veh_id][self.key_dict['next_steering']] = next_steering
 
         if self.predict_rtgs:
             for veh_id in vehicle_data_dict.keys():
@@ -275,3 +313,47 @@ class AutoregressivePolicy(Policy):
         veh.steering = steering
 
         return veh, [acceleration, steering]
+
+
+    def k_action_to_controls(self, veh_id, action_token, t):
+        """
+        Convert a k-disk token into acceleration and steering controls using the learned vocabulary.
+        
+        Args:
+            veh_id: Vehicle identifier
+            action_token: K-disk action token (0 to vocab_size-1)
+            t: Current timestep
+            
+        Returns:
+            tuple: (acceleration, steering) control values
+        """
+        idx = self.veh_id_to_idx[veh_id]
+        cur_state = self.states[idx, t].reshape(1, -1)
+        exists = cur_state[:, -1]
+        
+        # Forward k-disks to get next state
+        next_state = forward_k_disks(cur_state.copy(), np.array([action_token]), self.k_vocab, self.k_dt, exists)[0]
+
+        # Extract current state information
+        cur_pos = cur_state[0, :2]
+        cur_theta = cur_state[0, 4]
+        cur_speed = float(np.linalg.norm(cur_state[0, 2:4]))
+        
+        # Extract next state information
+        next_pos = next_state[:2]
+        next_theta = next_state[4]
+        next_speed = float(np.linalg.norm(next_state[2:4]))
+        
+        # Get wheelbase (approximate as 65% of vehicle length, typical for most vehicles)
+        vehicle_length = float(cur_state[0, 5])
+        wheelbase = float(max(vehicle_length * 0.65, 0.8))  # minimum 0.8m for small vehicles
+
+        # Initialize bicycle model at next state, then infer controls via inverse dynamics
+        bm = BicycleModel(x=next_pos[0], y=next_pos[1], theta=next_theta, L=wheelbase, vel=next_speed, dt=self.k_dt)
+        accel, steer, _, _ = bm.backward(prev_pos=cur_pos, prev_theta=cur_theta, prev_vel=cur_speed, dt=self.k_dt)
+
+        # Clip controls to configured bounds
+        accel = float(np.clip(accel, self.min_accel, self.max_accel))
+        steer = float(np.clip(steer, self.min_steer, self.max_steer))
+
+        return accel, steer

@@ -92,11 +92,13 @@ class Decoder(nn.Module):
         grid_action_preds = self._reshape_actions(grid_action_logits, batch_size, seq_len, self.grid_action_dim)
         k_action_preds = self._reshape_actions(k_action_logits, batch_size, seq_len, self.k_action_dim) if self.predict_k_action is not None else None
 
+        # Collect prediction outputs
         if grid_action_preds is not None:
             preds['grid_action_preds'] = grid_action_preds
         if k_action_preds is not None:
             preds['k_action_preds'] = k_action_preds
-
+        
+        # Final action predictions based on action space 
         if self.use_k_actions:
             if k_action_preds is None:
                 raise ValueError("k_action head is not initialized but action_space is k_action.")
